@@ -14,11 +14,11 @@
 #' \code{occData} that is used to assign the different batches that the species
 #' distribution model is going to be applied.  If \code{NULL} (the default),
 #' then only a single SDM is run on the entire occurrence data. If a valid
-#' column name is given then a seperate SDM is run for each subset of the
+#' column name is given then a separate SDM is run for each subset of the
 #' occurrence data based on unique values in that column.
 #' @param outLoc A character scalar containing the location to store the output
 #' model objects. If \code{group} is \code{NULL} then the model outputs are
-#' stored directly in the directory specified. Otherwise, a subfolder is
+#' stored directly in the directory specified. Otherwise, a sub-folder is
 #' created for each SDM.
 #' @param numCores Integer vector containing the number of processes to be run
 #' simultaneously. If \code{group} is not \code{NULL} then the first element of
@@ -96,18 +96,92 @@ runSDM <- function(sdmFunc, occData, group = NULL, outLoc = tempdir(), numCores 
     uniqueGroups[0:(length(uniqueGroups) - 1) %% totCores + 1 == coreNum]
   }, uniqueGroups = uniqueGroups, totCores = parNumCores[1])
   # 1.1.3 ---- Function to process groups ----
-  runGroups <- function(groupsToProc, parOutLoc, parOccData, groupVals, otherParams) {
-    sapply(X = groupsToProc, FUN = function(curGroup, parOutLoc, parOccData, groupVals, otherParams) {
-      # Filter out the occurrence data entries that belong in the current group
-      curOccData <- parOccData[groupVals == curGroup, ]
-      # Create an output folder to store the model outputs
-      curOutLoc <- file.path(parOutLoc, curGroup)
-      if(dir.exists(curOutLoc)) {
-        unlist(curOutLoc, recursive = TRUE)
-      }
-      if(!dir.create(curOutLoc)) {
-        stop("unable to create output folder at ", curOutLoc)
-      }
-    }, parOutLoc = parOutLoc, parOccData = parOccData, groupVals = groupVals, otherParams = otherParams)
+  runGroups <- function(groupsToProc, parOutLoc, parOccData, groupVals, otherParams, sdmFunc, numCores, requiredPackages) {
+    # Create a future to run the group block
+    future::future({
+      # Iterate over each group and run the SDM on each group in turn
+      stats::setNames(sapply(X = groupsToProc, FUN = function(curGroup, parOutLoc, parOccData, groupVals, otherParams, sdmFunc, numCores) {
+        # Filter out the occurrence data entries that belong in the current group
+        curOccData <- parOccData[groupVals == curGroup, ]
+        # Create an output folder to store the model outputs
+        curOutLoc <- file.path(parOutLoc, curGroup)
+        if(dir.exists(curOutLoc)) {
+          unlink(curOutLoc, recursive = TRUE)
+        }
+        if(!dir.create(curOutLoc)) {
+          stop("unable to create output folder at ", curOutLoc)
+        }
+        # Redirect the output and message to a log file
+        outConnec <- file(file.path(curOutLoc, "log.txt"), open = "a+")
+        sink(outConnec, append = TRUE, type = "output")
+        sink(outConnec, append = TRUE, type = "message")
+        on.exit({
+          sink(type = "output")
+          sink(type = "message")
+          close(outConnec)
+        }, add = TRUE)
+        # Create a new set of parameters for the currently processed group
+        allParams <- append(otherParams, list(
+          occData = curOccData,
+          outLoc = curOutLoc,
+          numCores = numCores
+        ))
+        # Call the SDM function using the aggregated parameter set
+        do.call(sdmFunc, allParams)
+      }, parOutLoc = parOutLoc, parOccData = parOccData, groupVals = groupVals, otherParams = otherParams, sdmFunc = sdmFunc, numCores = numCores), groupsToProc)
+    }, packages = requiredPackages, seed = TRUE, earlySignal = TRUE, conditions = structure("condition", exclude = "message"), globals = list(
+      groupsToProc = groupsToProc, parOutLoc = parOutLoc, parOccData = parOccData, groupVals = groupVals, otherParams = otherParams, sdmFunc = sdmFunc, numCores = numCores
+    ))
   }
+  # 1.1.4 ---- Process each of the groups in parallel ----
+  # Set the amount of parallelisation that will go on within each of the model run scripts
+  if(length(groupsInCores) <= 1) {
+    coreToUse <- parNumCores
+  } else if(length(parNumCores) > 1) {
+    coreToUse <- parNumCores[2:length(parNumCores)]
+  } else {
+    coreToUse <- 1
+  }
+  # Retrieve a list of packages that are required for the parallel runs
+  requiredPackages <- gsub(
+    "\\s*\\(.*$",
+    "",
+    unlist(strsplit(unlist(utils::packageDescription("ECoMAPr", fields = c("Imports", "Enhances", "Depends"))), "\\s*,\\s*", perl = TRUE)),
+    perl = TRUE)
+  requiredPackages <- unique(c(requiredPackages[requiredPackages != "R" & sapply(X = requiredPackages, FUN = function(curName) {
+    length(find.package(curName, quiet = TRUE)) > 0
+  })], loadedNamespaces()))
+  # Delete all folders that exist that coincide with folders to store model outputs
+  unlink(file.path(parOutLoc, uniqueGroups), recursive = TRUE)
+  # Start the processes
+  futureVec <- lapply(X = groupsInCores, FUN = runGroups, parOutLoc = parOutLoc, parOccData = parOccData, groupVals = groupVals, otherParams = otherParams, sdmFunc = sdmFunc, numCores = coreToUse, requiredPackages = requiredPackages)
+  statusTextLength <- 0
+  while(!all(future::resolved(futureVec))) {
+    # Delete previous status message
+    if(statusTextLength > 0) {
+      message(rep(c("\b", " ", "\b"), rep(statusTextLength, 3)), appendLF = FALSE)
+    }
+    # Create a new status message about the processes
+    statusText <- paste("Process ", 1:length(groupsInCores), ": ", sapply(X = groupsInCores, FUN = function(groupVals, parOutLoc) {
+      outText <- "initialising"
+      hasProcessed <- dir.exists(file.path(parOutLoc, groupVals))
+      if(any(hasProcessed)) {
+        curgroupIndx <- max(which(hasProcessed), na.rm = TRUE)
+        outText <- paste("processing group ", groupVals[curgroupIndx], " (group ", curgroupIndx, " out of ", length(groupVals), ")", sep = "")
+      }
+    }, parOutLoc = parOutLoc), sep = "", collapse = "\n")
+    statusTextLength <- nchar(statusText)
+    message(statusText, appendLF = FALSE)
+    utils::flush.console()
+    # Sleep for a minute before querying whether the processes are complete again
+    Sys.sleep(60)
+  }
+  # Retrieve the model object locations from the completed futures
+  outObLocs <- unlist(lapply(X = futureVec, FUN = future::value))
+  if(any(is.na(outObLocs))) {
+    failedGroups <- names(outObLocs)[is.na(outObLocs)]
+    outText <- paste("\tGroup", failedGroups, "- see", file.path(parOutLoc, failedGroups, "log.txt"), "for details", sep = " ", collapse = "\n")
+    warning("at least one group encountered an error when creating the model object:\n", outText)
+  }
+  outObLocs
 }

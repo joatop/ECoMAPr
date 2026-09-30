@@ -52,7 +52,6 @@ Imports:
     tidyterra,
     fmesher,
     future,
-    future.apply,
     INLA,
     inlabru,
     taxize
