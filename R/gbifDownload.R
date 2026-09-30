@@ -190,14 +190,40 @@ processDatasetTitle <- function(inTitles, targetWidth) {
 #' character must be provided here defining the taxonomic level to conduct the
 #' query at. See \code{\link[rgbif]{name_lookup}} for acceptable values to use
 #' for the \code{rank} argument.
+#' @param synonyms A character vector containing the list of taxonomic databases
+#' to search for possible synonym names for the taxa names. See "details" for
+#' more information on this.
 #' @param ... Other parameters passed to the \code{\link[rgbif]{name_lookup}}
 #' function when querying GBIF's taxonomies database.
 #'
 #' @return A \code{data.frame} containing the taxonomic information for all
 #' matching taxa according to the criteria specified in the function arguments.
+#' 
+#' @details The \code{\link[rgbif]{name_lookup}} functions that is used in this
+#' function has been flagged as deprecated. However, the suggested replacements
+#' for this function are in a package that has been removed from CRAN and
+#' requires installation through a separate package manager.  Using the
+#' replacement would therefore induce complex dependencies in the ECoMAPr
+#' package if we were to use that instead. We will therefore keep the dependence
+#' upon the deprecated function for the time being but we will update the
+#' internal implementation of this function when CRAN-compliant options become
+#' available.
+#' 
+#' The \code{synonyms} argument is a character vector containing the set of
+#' taxonomic databases to check for possible synonyms. Each element of the
+#' character may have the following (case-insensitive) values: \code{"gbif"}
+#' (Global Biodiversity Information Facility taxonomic backbone), \code{"itis"}
+#' (Integrated Taxonomic Information System), \code{"tropicos"} (Tropicos online
+#' database of the Missouri Botanical Garden), \code{"nbn"} ("National
+#' Biodiversity Network"), \code{"worms"} ("World Register of Marine Species"),
+#' \code{"pow"} ("Plants of the World Online"). If the argument is NULL then the
+#' function will default to using all available databases.  Note that use of the
+#' Tropicos database requires an API key: see \code{\link[taxize]{synonyms}} for
+#' more information.
 #'
 #' @author Joseph D. Chipperfield, \email{joechip90@@googlemail.com}
-#' @seealso \code{\link[rgbif]{name_lookup}}
+#' @seealso \code{\link[rgbif]{name_lookup}} \code{\link[rgbif]{name_usage}}
+#' \code{\link[taxize]{synonyms}}
 #' @export
 taxonLookup <- function(
     kingdom = NULL,
@@ -210,8 +236,33 @@ taxonLookup <- function(
     other = NULL,
     limit = NULL,
     rank = NULL,
+    synonyms = NULL,
     ...
 ) {
+  ### 1.2.1 ---- Setup the synonym look-up information ----
+  inSynonyms <- synonyms
+  # Sanity check the synonyms argument
+  if(is.null(synonyms)) {
+    inSynonyms <- c("gbif", "itis", "nbn", "worms")
+    if(Sys.getenv("TROPICOS_KEY") != "" || !is.null(getOption("TROPICOS_KEY"))) {
+      # Tropicos API key found so add that database to the list of searched databases
+      inSynonyms <- c(inSynonyms, "tropicos")
+    }
+  }
+  inSynonyms <- tryCatch(unique(as.character(inSynonyms)), error = function(err) {
+    inSynonyms <- as.charcater(c())
+  })
+  inSynonyms <- tolower(inSynonyms[!is.na(inSynonyms)])
+  isValidDB <- inSynonyms %in% c("gbif", "itis", "tropicos", "nbn", "worms", "pow")
+  if(!all(isValidDB)) {
+    warning("non-valid values given for taxonomic database synonym lookup: ", paste(inSynonyms[!isValidDB], collapse = ", "))
+    inSynonyms <- inSynonyms[isValidDB]
+  }
+  if(any(inSynonyms == "tropicos") && Sys.getenv("TROPICOS_KEY") == "" && is.null(getOption("TROPICOS_KEY"))) {
+    warning("request to use tropicos botanical database for synonym lookup but no API authentication key is available: removing tropicos from list of used databases")
+    inSynonyms <- inSynonyms[inSynonyms != "tropicos"]
+  }
+  ### 1.2.2 ---- Sanity check the other input information ----
   # Set the hard limit set by the GBIF API
   gbifLimit <- 99999
   # Sanity check the limit
@@ -222,7 +273,7 @@ taxonLookup <- function(
     inLimit <- Inf
   } else if(length(inLimit) > 1) {
     warning("limit argument has length greater than one: only the first element will be used")
-    inLimit <- inLimit
+    inLimit <- inLimit[1]
   }
   if(is.na(inLimit)) {
     inLimit <- Inf
@@ -258,6 +309,9 @@ taxonLookup <- function(
   }
   qryLvlIndx <- qryLvlIndx[1]
   qryLvl <- names(taxaSpec)[qryLvlIndx[1]]
+  if(length(rankInfo) <= 0) {
+    rankInfo <- qryLvl
+  }
   # Retrieve the list of ... parameters
   extraArgs <- eval(substitute(list(...)))
   if(!is.null(extraArgs$verbose)) {
@@ -265,7 +319,7 @@ taxonLookup <- function(
   }
   extraArgs$verbose <- FALSE
   startIndex <- 0
-  # Prcoess the 'start' argument if it is provided in
+  # Process the 'start' argument if it is provided in the list
   if(!is.null(extraArgs$start)) {
     startIndex <- tryCatch(as.integer(extraArgs$start), error = function(err) {
       stop("invalid entry for the start argument: ", err)
@@ -280,46 +334,7 @@ taxonLookup <- function(
       stop("invalid entry for the start argument: value is NA or less than zero")
     }
   }
-  outList <- lapply(X = taxaSpec[[qryLvl]], FUN = function(curQueryVal, taxaSpec, qryLvl, extraArgs, rankInfo, inLimit, gbifLimit, startIndex) {
-    # Retrieve the rank of the current query
-    curRank <- qryLvl
-    if(curRank == "other") {
-      if(length(rankInfo) <= 0) {
-        stop("rank information not set when the 'other' taxonomic level is specified")
-      }
-      curRank <- rankInfo
-    }
-    # Break up the query into smaller chunks (with maximum size set by the GBIF limit)
-    # and then stitch them all together
-    outFrame <- NULL
-    curStart <- startIndex
-    endOfRecords <- FALSE
-    message("retrieving entries from GBIF names database that have \"", curRank, "\" values similar to ", curQueryVal, "...")
-    while(!endOfRecords && curStart < inLimit) {
-      queryOut <- do.call(rgbif::name_lookup, c(list(
-        query = curQueryVal, rank = curRank,
-        limit = min(inLimit - curStart, gbifLimit),
-        start = curStart), extraArgs))
-      curStart <- curStart + nrow(queryOut$data)
-      endOfRecords <- all(queryOut$meta[, "endOfRecords"], na.rm = TRUE)
-      outFrame <- rbind(outFrame, as.data.frame(queryOut$data))
-    }
-    # Filter the data frame based on the other rank restrictions
-    curQryInd <- which(names(taxaSpec) == qryLvl)[1] + 1
-    rowsToUse <- rep(TRUE, nrow(outFrame))
-    if(curQryInd < length(taxaSpec)) {
-      rowsToUse <- apply(X = sapply(X = curQryInd:length(taxaSpec), FUN = function(curQryIndVal, taxaSpec, outFrame) {
-        curAllowableValues <- taxaSpec[[curQryIndVal]]
-        curCol <- names(taxaSpec)[curQryIndVal]
-        rowsToUse <- rep(TRUE, nrow(outFrame))
-        if(length(curAllowableValues) > 0) {
-          rowsToUse <- tolower(outFrame[, curCol]) %in% tolower(curAllowableValues)
-        }
-        rowsToUse
-      }, taxaSpec = taxaSpec, outFrame = outFrame), MARGIN = 1, FUN = all)
-    }
-    outFrame[rowsToUse, ]
-  }, taxaSpec = taxaSpec, qryLvl = qryLvl, extraArgs = extraArgs, rankInfo = rankInfo, inLimit = inLimit, gbifLimit = gbifLimit, startIndex = startIndex)
+  ### 1.2.3 ---- Function to combine data fraem with different column numbers by padding with NAs ----
   # Helper function to bind table when columns differ (occasionally happens due to weird ways the taxon lookup happens)
   rbindPad <- function(inList) {
     allColNames <- unique(unlist(lapply(X = inList, FUN = colnames)))
@@ -334,7 +349,220 @@ taxonLookup <- function(
     }, allColNames = allColNames)
     do.call(rbind, outList)
   }
-  rbindPad(outList)
+  ### 1.2.3 ---- Function to look-up GBIF names ----
+  # Function to retrieve taxonomic information from GBIF
+  gbifNamesLookup <- function(taxaSpec, qryLvl, extraArgs, rankInfo, inLimit, gbifLimit, startIndex) {
+    outList <- lapply(X = taxaSpec[[qryLvl]], FUN = function(curQueryVal, taxaSpec, qryLvl, extraArgs, rankInfo, inLimit, gbifLimit, startIndex) {
+      # Retrieve the rank of the current query
+      curRank <- qryLvl
+      if(curRank == "other") {
+        if(length(rankInfo) <= 0) {
+          stop("rank information not set when the 'other' taxonomic level is specified")
+        }
+        curRank <- rankInfo
+      }
+      # Break up the query into smaller chunks (with maximum size set by the GBIF limit)
+      # and then stitch them all together
+      outFrame <- NULL
+      curStart <- startIndex
+      endOfRecords <- FALSE
+      message("Retrieving entries from GBIF names database that have \"", curRank, "\" values similar to ", curQueryVal, "...")
+      while(!endOfRecords && curStart < inLimit) {
+        queryOut <- do.call(rgbif::name_lookup, c(list(
+          query = curQueryVal, rank = curRank,
+          limit = min(inLimit - curStart, gbifLimit),
+          start = curStart), extraArgs))
+        curStart <- curStart + nrow(queryOut$data)
+        endOfRecords <- all(queryOut$meta[, "endOfRecords"], na.rm = TRUE)
+        outFrame <- rbind(outFrame, as.data.frame(queryOut$data))
+      }
+      # Filter the data frame based on the other rank restrictions
+      curQryInd <- which(names(taxaSpec) == qryLvl)[1] + 1
+      rowsToUse <- rep(TRUE, nrow(outFrame))
+      if(curQryInd < length(taxaSpec)) {
+        rowsToUse <- apply(X = sapply(X = curQryInd:length(taxaSpec), FUN = function(curQryIndVal, taxaSpec, outFrame) {
+          curAllowableValues <- taxaSpec[[curQryIndVal]]
+          curCol <- names(taxaSpec)[curQryIndVal]
+          rowsToUse <- rep(TRUE, nrow(outFrame))
+          if(length(curAllowableValues) > 0) {
+            rowsToUse <- tolower(outFrame[, curCol]) %in% tolower(curAllowableValues)
+          }
+          rowsToUse
+        }, taxaSpec = taxaSpec, outFrame = outFrame), MARGIN = 1, FUN = all)
+      }
+      outFrame[rowsToUse, ]
+    }, taxaSpec = taxaSpec, qryLvl = qryLvl, extraArgs = extraArgs, rankInfo = rankInfo, inLimit = inLimit, gbifLimit = gbifLimit, startIndex = startIndex)
+    outList <- rbindPad(outList)
+  }
+  ### 1.2.4 ---- Perform initial GBIF look-up based on search criteria ----
+  outList <- gbifNamesLookup(taxaSpec = taxaSpec, qryLvl = qryLvl, extraArgs = extraArgs, rankInfo = rankInfo, inLimit = inLimit, gbifLimit = gbifLimit, startIndex = startIndex)
+  synList <- data.frame()
+  ### 1.2.5 ---- Increase search to include synonyms ----
+  if(length(inSynonyms) > 0) {
+    # Helper function to convert taxa specifications for import into synonym
+    # look-up functions
+    formatForLookup <- function(taxaSpec, qryLvl, rankInfo) {
+      outVals <- taxaSpec[[qryLvl]]
+      if(rankInfo == "subspecies") {
+        outVals <- unlist(lapply(X = taxaSpec["species"], FUN = function(curSpec, subSpecs) {
+          c(paste(curSpec, "subsp.", subSpecs, sep = " "), paste(curSpec, "ssp.", subSpecs, sep = " "))
+        }, subSpecs = outVals))
+      } else if(rankInfo == "variety") {
+        outVals <- unlist(lapply(X = taxaSpec["species"], FUN = function(curSpec, subSpecs) {
+          paste(curSpec, "var.", subSpecs, sep = " ")
+        }, subSpecs = outVals))
+      } else if(rankInfo == "cultivar") {
+        outVals <- unlist(lapply(X = taxaSpec["species"], FUN = function(curSpec, subSpecs) {
+          paste(curSpec, "cv.", subSpecs, sep = " ")
+        }, subSpecs = outVals))
+      }
+      outVals
+    }
+    taxaLookup <- formatForLookup(taxaSpec, qryLvl, rankInfo)
+    if("gbif" %in% inSynonyms) {
+      # Check the GBIF taxonomic backbone for synonyms
+      synList <- rbindPad(lapply(X = outList$key, FUN = function(curKey) {
+        rgbif::name_usage(curKey, data = "synonyms")$data
+      }))
+      message("Searching GBIF taxonomic backbone for synonyms...", nrow(synList), " found")
+      outList <- rbindPad(list(outList, synList))
+    }
+    synnames <- c()
+    if("itis" %in% inSynonyms) {
+      # Check the Integrated Taxonomic Information System for synonyms
+      txnms <- suppressWarnings({
+        as.numeric(taxize::get_tsn(taxaLookup, messages = FALSE, ask = FALSE, accepted = FALSE))
+      })
+      txnms <- txnms[!is.na(txnms)]
+      curnames <- c()
+      if(length(txnms) > 0) {
+        curnames <- suppressMessages({
+          unlist(lapply(X = taxize::synonyms(txnms, db = "itis"), FUN = function(cursyns) { cursyns$syn_name }))
+        })
+        synnames <- c(synnames, curnames)
+      }
+      message("Searching the Integrated Taxonomic Information System (ITIS) for synonyms...", length(curnames), " found")
+    }
+    if("tropicos" %in% inSynonyms) {
+      # Check the Tropicos taxonomic database
+      txnms <- suppressWarnings({
+        as.numeric(taxize::get_tpsid(taxaLookup, messages = FALSE, ask = FALSE))
+      })
+      txnms <- txnms[!is.na(txnms)]
+      curnames <- c()
+      if(length(txnms) > 0) {
+        curnames <- suppressMessages({
+          unlist(lapply(X = taxize::synonyms(txnms, db = "tropicos"), FUN = function(cursyns) { cursyns$syn_name }))
+        })
+        synnames <- c(synnames, curnames)
+      }
+      message("Searching the Tropicos online botanical database for synonyms...", length(curnames), " found")
+    }
+    if("nbn" %in% inSynonyms) {
+      # Check the UK National Biodiversity Network taxonomic database
+      txnms <- suppressWarnings({
+        as.numeric(taxize::get_nbnid(taxaLookup, messages = FALSE, ask = FALSE))
+      })
+      txnms <- txnms[!is.na(txnms)]
+      curnames <- c()
+      if(length(txnms) > 0) {
+        curnames <- suppressMessages({
+          unlist(lapply(X = taxize::synonyms(txnms, db = "nbn"), FUN = function(cursyns) { cursyns$syn_name }))
+        })
+        synnames <- c(synnames, curnames)
+      }
+      message("Searching the UK National Biodiversity Network taxonomic database for synonyms...", length(curnames), " found")
+    }
+    if("worms" %in% inSynonyms) {
+      # Check the WoRMS taxonomic database
+      txnms <- suppressWarnings({
+        as.numeric(taxize::get_wormsid(taxaLookup, messages = FALSE, ask = FALSE))
+      })
+      txnms <- txnms[!is.na(txnms)]
+      curnames <- c()
+      if(length(txnms) > 0) {
+        curnames <- suppressMessages({
+          unlist(lapply(X = taxize::synonyms(txnms, db = "worms"), FUN = function(cursyns) { cursyns$syn_name }))
+        })
+        synnames <- c(synnames, curnames)
+      }
+      message("Searching the World Register of Marine Species (WoRMS) taxonomic database for synonyms...", length(curnames), " found")
+    }
+    if("pow" %in% inSynonyms) {
+      # Check Kew's Plants of the World taxonomic database
+      txnms <- suppressWarnings({
+        as.numeric(taxize::get_pow(taxaLookup, accepted = FALSE, messages = FALSE, ask = FALSE))
+      })
+      txnms <- txnms[!is.na(txnms)]
+      curnames <- c()
+      if(length(txnms) > 0) {
+        curnames <- suppressMessages({
+          unlist(lapply(X = taxize::synonyms(txnms, db = "pow"), FUN = function(cursyns) { cursyns$syn_name }))
+        })
+        synnames <- c(synnames, curnames)
+      }
+      message("Searching Kew's Plants of the World taxonomic database for synonyms...", length(curnames), " found")
+    }
+    if(length(synnames) > 0) {
+      synnames <- unique(synnames)
+      message("Retrieving entries from GBIF for found synonyms: ", paste(synnames, collapse = ", "))
+      issubspecies <- grepl("\\s+ssp\\.\\s+", synnames, perl = TRUE) | grepl("\\s+subsp\\.\\s+", synnames, perl = TRUE)
+      isvariety <- grepl("\\s+var\\.\\s+", synnames, perl = TRUE)
+      iscultivar <- grepl("\\s+cv\\.\\s+", synnames, perl = TRUE)
+      if(any(!issubspecies & !isvariety & !iscultivar)) {
+        # Handle all taxa synonyms that are not sub-species, varieties, or cultivars
+        newTaxaSpec <- taxaSpec
+        newQryLvl <- qryLvl
+        newRankInfo <- rankInfo
+        if(rankInfo == "subspecies" || rankInfo == "cultivar" || rankInfo == "variety") {
+          newRankInfo <- "species"
+          newQryLvl <- "species"
+          newTaxaSpec$other <- as.character(c())
+          newTaxaSpec$species <- synnames[!issubspecies & !isvariety & !iscultivar]
+        }
+        outList <- rbindPad(list(outList,
+          gbifNamesLookup(taxaSpec = newTaxaSpec, qryLvl = newQryLvl, extraArgs = extraArgs, rankInfo = newRankInfo, inLimit = inLimit, gbifLimit = gbifLimit, startIndex = 0)
+        ))
+      }
+      if(any(issubspecies)) {
+        splitbins <- strsplit(synnames[issubspecies], "\\s+(ssp|subsp)\\.\\s+", perl = TRUE)
+        # Handle all taxa synonyms that are sub-species
+        newTaxaSpec <- taxaSpec
+        newQryLvl <- "other"
+        newRankInfo <- "subspecies"
+        newTaxaSpec$species <- unique(sapply(X = splitbins, FUN = function(inval) { inval[1]} ))
+        newTaxaSpec$other <- unique(sapply(X = splitbins, FUN = function(inval) { inval[2]} ))
+        outList <- rbindPad(list(outList,
+          gbifNamesLookup(taxaSpec = newTaxaSpec, qryLvl = newQryLvl, extraArgs = extraArgs, rankInfo = newRankInfo, inLimit = inLimit, gbifLimit = gbifLimit, startIndex = 0)
+        ))
+      }
+      if(any(isvariety)) {
+        splitbins <- strsplit(synnames[isvariety], "\\s+var\\.\\s+", perl = TRUE)
+        # Handle all taxa synonyms that are varieties
+        newTaxaSpec <- taxaSpec
+        newQryLvl <- "other"
+        newRankInfo <- "variety"
+        newTaxaSpec$species <- unique(sapply(X = splitbins, FUN = function(inval) { inval[1]} ))
+        newTaxaSpec$other <- unique(sapply(X = splitbins, FUN = function(inval) { inval[2]} ))
+        outList <- rbindPad(list(outList,
+          gbifNamesLookup(taxaSpec = newTaxaSpec, qryLvl = newQryLvl, extraArgs = extraArgs, rankInfo = newRankInfo, inLimit = inLimit, gbifLimit = gbifLimit, startIndex = 0)
+        ))
+      }
+      if(any(iscultivar)) {
+        splitbins <- strsplit(synnames[iscultivar], "\\s+cv\\.\\s+", perl = TRUE)
+        # Handle all taxa synonyms that are cultivars
+        newTaxaSpec <- taxaSpec
+        newQryLvl <- "other"
+        newRankInfo <- "cultivar"
+        newTaxaSpec$species <- unique(sapply(X = splitbins, FUN = function(inval) { inval[1]} ))
+        newTaxaSpec$other <- unique(sapply(X = splitbins, FUN = function(inval) { inval[2]} ))
+        outList <- rbindPad(list(outList,
+          gbifNamesLookup(taxaSpec = newTaxaSpec, qryLvl = newQryLvl, extraArgs = extraArgs, rankInfo = newRankInfo, inLimit = inLimit, gbifLimit = gbifLimit, startIndex = 0)
+        ))
+      }
+    }
+  }
+  outList
 }
 
 ### 1.3 ==== Function to Produce a JSON Query for GBIF's API ====

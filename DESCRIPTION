@@ -54,7 +54,8 @@ Imports:
     future,
     future.apply,
     INLA,
-    inlabru
+    inlabru,
+    taxize
 LazyData: true
 Depends: R (>= 4.3.0)
 Suggests: 
