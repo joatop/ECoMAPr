@@ -2,6 +2,7 @@
 
 S3method(print,datasetplotGrob)
 export(autoplot.gbifOcc)
+export(classifyOccDataType)
 export(datasetplot)
 export(gbifOccDownload)
 export(jsonOccFormulation)

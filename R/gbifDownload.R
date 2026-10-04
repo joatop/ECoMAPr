@@ -242,7 +242,20 @@ taxonLookup <- function(
   ### 1.2.1 ---- Setup the synonym look-up information ----
   inSynonyms <- synonyms
   # Sanity check the synonyms argument
-  if(is.null(synonyms)) {
+  if(is.logical(inSynonyms)) {
+    if(length(inSynonyms) <= 0) {
+      inSynonyms <- FALSE
+    } else if(length(inSynonyms) > 1) {
+      warning("synonyms argument is a logical vector and has a length greater than one: only the first element will be used")
+      inSynonyms <- inSynonyms[1]
+    }
+    if(inSynonyms) {
+      inSynonyms <- NULL
+    } else {
+      inSynonyms <- as.character(c())
+    }
+  }
+  if(is.null(inSynonyms)) {
     inSynonyms <- c("gbif", "itis", "nbn", "worms")
     if(Sys.getenv("TROPICOS_KEY") != "" || !is.null(getOption("TROPICOS_KEY"))) {
       # Tropicos API key found so add that database to the list of searched databases
@@ -250,7 +263,7 @@ taxonLookup <- function(
     }
   }
   inSynonyms <- tryCatch(unique(as.character(inSynonyms)), error = function(err) {
-    inSynonyms <- as.charcater(c())
+    inSynonyms <- as.character(c())
   })
   inSynonyms <- tolower(inSynonyms[!is.na(inSynonyms)])
   isValidDB <- inSynonyms %in% c("gbif", "itis", "tropicos", "nbn", "worms", "pow")

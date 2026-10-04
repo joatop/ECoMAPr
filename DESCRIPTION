@@ -54,7 +54,12 @@ Imports:
     future,
     INLA,
     inlabru,
-    taxize
+    taxize,
+    gridExtra,
+    jsonlite,
+    methods,
+    parallelly,
+    rgbif
 LazyData: true
 Depends: R (>= 4.3.0)
 Suggests: 
