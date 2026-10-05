@@ -9,6 +9,7 @@ classifyOccDataType(
   datasetIDCol = "datasetKey",
   occurrenceStatusCol = "occurrenceStatus",
   densityCol = c("individualCount", "organismQuantity"),
+  occurrenceOutColName = "occValues",
   densityOutColName = "densityValues"
 )
 }
@@ -26,6 +27,10 @@ column(s) containing the occurrence status (marked as \code{"PRESENT"} or
 \item{densityCol}{A character vector containing the name of the column(s)
 containing the density data.}
 
+\item{occurrenceOutColName}{A character scalar giving the name for the extra
+column that will be appended to the occurrence data that will store the
+combined occurrence information.}
+
 \item{densityOutColName}{A character scalar giving the name for the extra
 column that will be appended to the density data that will store the combined
 density information.}
@@ -35,10 +40,11 @@ A list with the following elements:
 \describe{
 \item{\code{presenceOnly}}{A data frame containing the rows that have been
 classified as having data that only contains presence records with no
-information on sampling effort ("presence only data".}
+information on sampling effort ("presence only data").}
 \item{\code{presenceAbsence}}{A data frame containing the rows that have
 been classified as having data that contains presences or absences
-("presence/absence data").}
+("presence/absence data"). An extra column is appended to the data frame
+with a name specified by \code{occurrenceOutColName}.}
 \item{\code{density}}{A data frame containing the rows that have been
 classified as having data that contains some form of density information
 ("density data").  An extra column is appended to the data frame with a name

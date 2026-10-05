@@ -4,7 +4,7 @@
 \alias{autoplot.gbifOcc}
 \title{Plot GBIF Occurrence Data}
 \usage{
-autoplot.gbifOcc(object, ...)
+\method{autoplot}{gbifOcc}(object, ...)
 }
 \arguments{
 \item{object}{An object that inherits from class \code{gbifOcc} (such as that
